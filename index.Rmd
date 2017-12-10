@@ -1,0 +1,186 @@
+---
+title: "Predicting Dumbbell Lift Performance"
+author: "susnell"
+date: "8 12 2017"
+output: 
+  html_document: 
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = FALSE,error = FALSE, comment = "", warning = FALSE)
+library(tidyverse)
+library(caret)
+```
+
+The purpose of this project is to predict how well test subjects are doing their dumbbell lifting exercises based on the data from several sensors attached to the subjects and the dumbbells.
+
+## The Data Sets
+
+The data comes from 6 test subjects that were instructed to do the exercise correctly (classe A) and perform the exercise incorrectly in 4 typical ways (classe B, C, D and E). http://groupware.les.inf.puc-rio.br/har
+
+The training set consists of 19622 observations of 160 variables. The test set, consists of only 20 observations, but significantly, by the same test subjects as in the training set. The test set does not include the classe variable. To assess the accuracy of the prediction for the test cases, the prediction must be submitted to a quiz on the Coursera website.
+```{r, include=FALSE}
+### Downloading the data, if the files do not exist
+trainurl<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+if(!file.exists("./pml-training.csv"))
+{download.file(trainurl,destfile = "./pml-training.csv",method = "curl")}
+
+testurl<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if(!file.exists("./pml-testing.csv"))
+{download.file(testurl,destfile = "./pml-testing.csv",method = "curl")}
+```
+
+
+```{r}
+### Reading files
+if(!exists("pmltraining0")) {pmltraining0 <- read.csv("pml-training.csv",stringsAsFactors = FALSE)}
+if(!exists("pmltesting0"))
+{pmltesting0 <- read.csv("pml-testing.csv",stringsAsFactors = FALSE)}
+```
+
+
+## Data Preprocessing
+
+The training data set contains both raw measurement variables and summary features derived from the raw data. These summary variables contain only a few rows of observations, for rest of the rows data is missing. The summary variables are therefore cleaned from the data, as are most of the variables related to the test setup. This leaves us with 53 variables to start building a prediction with. The same cleaning process of excess is performed both on the training set, and the 20 test cases.
+
+```{r reading data, include=FALSE,eval=FALSE}
+### Inspecting Data and Missing Values
+names(pmltraining0)
+str(pmltraining0)
+summary(pmltraining0)
+sapply(pmltraining0,function(x)sum(is.na(x)))
+```
+
+
+```{r}
+### TRAINING SET
+
+#only a few variables converted to factors
+pmltraining0$user_name<-as.factor(pmltraining0$user_name)
+pmltraining0$classe<-as.factor(pmltraining0$classe)
+pmltraining0$new_window<-as.factor(pmltraining0$new_window)
+pmltraining0$cvtd_timestamp<-as.Date(pmltraining0$cvtd_timestamp)
+
+#rest of the character columns to numeric
+chrcols<-sapply(pmltraining0,is.character)
+chrcolnrs<-which(chrcols==TRUE)
+pmltraining0[chrcolnrs]<-sapply(pmltraining0[chrcolnrs],as.numeric)
+
+#removing those variables that have mainly missing values
+nacols<-sapply(pmltraining0,function(x)sum(is.na(x)))
+nacolnrs<-which(nacols>0)
+pmltraining<-select(pmltraining0,-nacolnrs) 
+
+#removing also row number X, test time stamps, test window setups
+pmltraining<-select(pmltraining,-X,-(3:7)) 
+
+### SAME FOR THE TEST CASES
+```
+
+```{r, include=FALSE}
+#THE SAME WITH THE TEST SET
+
+#converting some varaibles to factors
+pmltesting0$user_name<-as.factor(pmltesting0$user_name)
+pmltesting0$new_window<-as.factor(pmltesting0$new_window)
+pmltesting0$cvtd_timestamp<-as.Date(pmltesting0$cvtd_timestamp)
+
+#rest of the character columns to numeric
+chrcols<-sapply(pmltesting0,is.character)
+chrcolnrs<-which(chrcols==TRUE)
+pmltesting0[chrcolnrs]<-sapply(pmltesting0[chrcolnrs],as.numeric)
+
+#removing those variables that have mainly missing values
+nacols<-sapply(pmltesting0,function(x)sum(is.na(x)))
+nacolnrs<-which(nacols>0)
+pmltesting<-select(pmltesting0,-nacolnrs) 
+
+#removing also row number X, test time stamps, test window setups
+pmltesting<-select(pmltesting,-X,-(3:7)) 
+```
+
+##Exploratory Analysis
+
+To understand how the remaining 53 variables might behave differently when lifting dumbbells correctly or not, they are plotted separately in a grid. Observations are coloured by test subjects to understand the variation in individual behavior.
+
+```{r fig.width=7, fig.height=24, echo=FALSE, cache=TRUE}
+pcolors <- c(
+ "steelblue4",
+ "darkseagreen4",
+ "goldenrod2",
+ "orangered3",
+ "steelblue1",
+ "darkseagreen1")
+
+pmltraining1<-gather(pmltraining,key=variable,value=value,-classe,-user_name)
+g<-ggplot(pmltraining1,aes(x=value,y=classe),fill=user_name)
+g+geom_point(aes(colour=user_name),alpha = 0.2)+
+    scale_colour_manual(values = pcolors)+
+    facet_wrap(~variable,ncol=3,scales = "free_x")
+```
+
+## Model Selection and Assesment
+
+The plot does not distinguish many variables that clearly differentiate between well (A) and badly performed dumbbell lifting methods (B,C,D,E). Some of the variables seem also highly correlated. Some variables have high variance depending on the test subject. To get a grasp of the importance of the variables, and to reduce the variance, random forest is chosen as the first method to tackle the data.  
+
+### Random Forest
+
+A first random forest analysis is performed with all the training data, all the 53 variables of raw data, and default values for the randomForest() -function.
+
+```{r, cache=TRUE}
+library(randomForest)
+set.seed(100)
+forest<-randomForest(classe ~., data=pmltraining)
+forest
+```
+
+The algorithm with default values produces a model from the training data, that has a really low error rate, only 0.3%. with all the 53 features loaded in to the model. This is the OOB error rate, by which random forest estimates how it how it well it will predict with samples not used in building the model. This is used as the test error rate for random forest models.
+```{r}
+plot(forest, col=pcolors)
+```
+
+The first model is built using the default 500 trees. This is not necessary, the error rate comes down and is fairly stable already before 100 trees. 
+
+```{r, include=FALSE,eval=FALSE}
+#variable importance 
+importance<-varImp(forest)
+varImpPlot(forest,type=2)
+importance2<-as.data.frame(cbind(variable=rownames(importance),Overall=importance$Overall))
+importance2$Overall<-as.numeric(as.character(importance2$Overall))
+importance2[order(-importance2$Overall),]
+
+```
+
+
+### Cross Validation
+
+Random forest is very handy method in classification because it removes the need to separately cross validate the model with a different sample. The method itself randomizes samples by bootstrapping. By randomizing samples and features for the tree, overfitting is also less of a problem for random forests. Cutting of number of trees early enough is more a question of performance than overfitting.
+
+The validation of the model, in this case, is the success of prediction for the test cases. Since the test case data has no correct output, the testing accuracy can be assessed only by submitting the correct answers to Coursera web site.
+
+```{r, eval=FALSE}
+predict(forest,newdata = pmltesting)
+```
+
+This first heavy, all features encompassing, random forest with 500 trees performs perfectly on the test cases. Since the test cases seem to be just 20 observations extracted from the big data set, and the test subjects are still the 6 same young men, it is imaginable that prediction is this easy. 
+
+To see if this was just a random effect of the random forest method, boosting is tested in an identical way. It also produces a heavy model that predicts correctly on the first run, although really slowly. This leads us to believe, that it is possible to get easily correct predictions from a tree based method from this data.
+
+
+```{r, eval=FALSE}
+### library(gbm)
+### set.seed(100)
+### boost<-train(classe ~ ., data=pmltraining,method="gbm") ### SLOW!!!
+### boost
+### predict(boost,newdata = pmltesting)
+```
+
+
+## Conclusion
+
+Random Forest is a good choice for classification task with this type of data structure. The model could be made lighter if it was to be used outside the context of this task. It is very difficult to see how this model would succeed in predictions with movements other individuals than the 6 test subjects.
+
+
+
+
